@@ -1,0 +1,13 @@
+{
+  "name": "leaderboard-role-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that gives roles to top 10 leaderboard players",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.0",
+    "express": "^4.21.0"
+  }
+}

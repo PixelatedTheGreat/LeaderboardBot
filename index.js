@@ -79,7 +79,7 @@ client.once("ready", async () => {
 
 async function updateStatus() {
   try {
-   const res = await fetch("https://games.roproxy.com/v1/games?universeIds=134514210493315");
+   const res = await fetch("https://games.roproxy.com/v1/games?universeIds=7593537576");
     const data = await res.json();
     const playerCount = data.data?.[0]?.playing || 0;
 

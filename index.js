@@ -74,12 +74,13 @@ client.once("ready", async () => {
   console.log(`Bot logged in as ${client.user.tag}`);
   await registerCommands();
   startServer();
+  updateStatus();
 });
 
 async function updateStatus() {
   try {
     const res = await fetch(
-      "https://games.roproxy.com/v1/games?universeIds=YOUR_UNIVERSE_ID"
+      "https://games.roproxy.com/v1/games?universeIds=134514210493315
     );
     const data = await res.json();
     const playerCount = data.data?.[0]?.playing || 0;

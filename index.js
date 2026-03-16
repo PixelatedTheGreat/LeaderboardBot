@@ -15,9 +15,20 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
-// Stores the set of Discord user IDs that currently have the role
-// Format: Set<string> of Discord user IDs
-let currentTop10DiscordIds = new Set();
+// Tracks Discord IDs per leaderboard so one update doesn't wipe another
+// Format: { "Currency": Set<discordId>, "Crates": Set<discordId>, ... }
+const leaderboardSets = {};
+
+// Combines all leaderboard sets into one flat set of Discord IDs
+function getAllTop10Ids() {
+  const combined = new Set();
+  for (const ids of Object.values(leaderboardSets)) {
+    for (const id of ids) {
+      combined.add(id);
+    }
+  }
+  return combined;
+}
 
 client.once("ready", () => {
   console.log(`Bot logged in as ${client.user.tag}`);
@@ -51,18 +62,25 @@ async function getDiscordIdsFromRoblox(robloxUserId) {
 
 // ── Role Management ──
 
-async function updateRoles(newDiscordIds) {
+async function updateRoles(leaderboardName, newDiscordIds) {
   const guild = client.guilds.cache.get(GUILD_ID);
   if (!guild) {
     console.error(`[Roles] Guild ${GUILD_ID} not found`);
     return;
   }
 
-  const newSet = new Set(newDiscordIds);
+  // Get the old combined set (everyone who had the role across all leaderboards)
+  const oldCombined = getAllTop10Ids();
 
-  // Remove role from players no longer in top 10
-  for (const discordId of currentTop10DiscordIds) {
-    if (!newSet.has(discordId)) {
+  // Update this specific leaderboard's set
+  leaderboardSets[leaderboardName] = new Set(newDiscordIds);
+
+  // Get the new combined set
+  const newCombined = getAllTop10Ids();
+
+  // Remove role from players no longer in ANY top 10
+  for (const discordId of oldCombined) {
+    if (!newCombined.has(discordId)) {
       try {
         const member = await guild.members.fetch(discordId).catch(() => null);
         if (member && member.roles.cache.has(TOP10_ROLE_ID)) {
@@ -79,7 +97,7 @@ async function updateRoles(newDiscordIds) {
   }
 
   // Add role to new top 10 players
-  for (const discordId of newSet) {
+  for (const discordId of newCombined) {
     try {
       const member = await guild.members.fetch(discordId).catch(() => null);
       if (member && !member.roles.cache.has(TOP10_ROLE_ID)) {
@@ -93,8 +111,6 @@ async function updateRoles(newDiscordIds) {
       );
     }
   }
-
-  currentTop10DiscordIds = newSet;
 }
 
 // ── Express API ──
@@ -144,8 +160,8 @@ function startServer() {
       `[API] Resolved ${allDiscordIds.length} Discord accounts from ${players.length} Roblox users`
     );
 
-    // Update roles
-    await updateRoles(allDiscordIds);
+    // Update roles for this specific leaderboard
+    await updateRoles(leaderboard, allDiscordIds);
 
     res.json({
       success: true,

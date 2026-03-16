@@ -393,6 +393,27 @@ function startServer() {
   app.listen(PORT, () => {
     console.log(`[API] Server listening on port ${PORT}`);
   });
+
+  app.get("/api/check-member/:robloxUserId", async (req, res) => {
+  if (req.headers.authorization !== API_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const robloxUserId = req.params.robloxUserId;
+  const discordIds = await getDiscordIdsFromRoblox(robloxUserId);
+
+  const guild = client.guilds.cache.get(GUILD_ID);
+  if (!guild) return res.json({ inServer: false });
+
+  for (const discordId of discordIds) {
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    if (member) {
+      return res.json({ inServer: true, discordId });
+    }
+  }
+
+  return res.json({ inServer: false });
+});
 }
 
 // ── Clear cache every 6 hours ──

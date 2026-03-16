@@ -1,4 +1,11 @@
-const { Client, GatewayIntentBits } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+} = require("discord.js");
 const express = require("express");
 
 // ── Config ──
@@ -9,7 +16,6 @@ const API_SECRET = process.env.API_SECRET;
 const BLOXLINK_API_KEY = process.env.BLOXLINK_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-// Role IDs — set these in Railway variables
 const TOP10_ROLE_ID = process.env.TOP10_ROLE_ID;
 const TOP50_ROLE_ID = process.env.TOP50_ROLE_ID;
 const TOP100_ROLE_ID = process.env.TOP100_ROLE_ID;
@@ -20,34 +26,163 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
-// Tracks per leaderboard: { "Currency": { discordId: rank, ... }, ... }
+// ── Data Stores ──
+
+// Leaderboard tracking: { "Currency": { discordId: rank }, ... }
 const leaderboardData = {};
 
-// Cache: Roblox user ID → Discord IDs (avoids repeat Bloxlink calls)
+// Player stats: { robloxUserId: { username, currency, rebirths, crates, playtime, ... } }
+const playerStats = new Map();
+
+// Bloxlink cache: robloxUserId → [discordIds]
 const robloxToDiscordCache = new Map();
 
-client.once("ready", () => {
+// Reverse cache: discordId → robloxUserId
+const discordToRobloxCache = new Map();
+
+// ── Slash Command Registration ──
+
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("stats")
+      .setDescription("Look up a player's in-game stats")
+      .addUserOption((option) =>
+        option
+          .setName("user")
+          .setDescription("Discord user to look up (defaults to yourself)")
+          .setRequired(false)
+      ),
+  ];
+
+  const rest = new REST().setToken(DISCORD_TOKEN);
+
+  try {
+    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
+      body: commands.map((c) => c.toJSON()),
+    });
+    console.log("[Commands] Registered /stats command");
+  } catch (err) {
+    console.error("[Commands] Failed to register commands:", err.message);
+  }
+}
+
+// ── Bot Ready ──
+
+client.once("ready", async () => {
   console.log(`Bot logged in as ${client.user.tag}`);
+  await registerCommands();
   startServer();
 });
+
+// ── Slash Command Handler ──
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "stats") {
+    const targetUser = interaction.options.getUser("user") || interaction.user;
+    const discordId = targetUser.id;
+
+    // Find their Roblox ID
+    const robloxId = discordToRobloxCache.get(discordId);
+
+    if (!robloxId || !playerStats.has(String(robloxId))) {
+      return interaction.reply({
+        content: `No stats found for <@${discordId}>. They need to have joined the game recently.`,
+        ephemeral: true,
+      });
+    }
+
+    const stats = playerStats.get(String(robloxId));
+
+    // Find their best leaderboard rank
+    let bestRank = null;
+    let bestBoard = null;
+    for (const [board, ranks] of Object.entries(leaderboardData)) {
+      if (ranks[discordId] !== undefined) {
+        if (bestRank === null || ranks[discordId] < bestRank) {
+          bestRank = ranks[discordId];
+          bestBoard = board;
+        }
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${stats.username}'s Stats`)
+      .setColor(0x5865f2)
+      .setThumbnail(
+        `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${robloxId}&size=150x150&format=Png&isCircular=false`
+      )
+      .setTimestamp();
+
+    // Add stat fields — adjust these to match what your game sends
+    if (stats.currency !== undefined)
+      embed.addFields({
+        name: "Currency",
+        value: formatNumber(stats.currency),
+        inline: true,
+      });
+    if (stats.rebirths !== undefined)
+      embed.addFields({
+        name: "Rebirths",
+        value: formatNumber(stats.rebirths),
+        inline: true,
+      });
+    if (stats.crates !== undefined)
+      embed.addFields({
+        name: "Crates",
+        value: formatNumber(stats.crates),
+        inline: true,
+      });
+    if (stats.playtime !== undefined)
+      embed.addFields({
+        name: "Playtime",
+        value: formatPlaytime(stats.playtime),
+        inline: true,
+      });
+
+    if (bestRank) {
+      embed.addFields({
+        name: "Best Rank",
+        value: `#${bestRank} on ${bestBoard}`,
+        inline: true,
+      });
+    }
+
+    return interaction.reply({ embeds: [embed] });
+  }
+});
+
+// ── Helpers ──
+
+function formatNumber(num) {
+  if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(1) + "B";
+  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
+  if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
+  return String(num);
+}
+
+function formatPlaytime(minutes) {
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
 
 // ── Bloxlink API (with cache) ──
 
 async function getDiscordIdsFromRoblox(robloxUserId) {
-  // Check cache first
   const cached = robloxToDiscordCache.get(String(robloxUserId));
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
   try {
     const res = await fetch(
       `https://api.blox.link/v4/public/guilds/${GUILD_ID}/roblox-to-discord/${robloxUserId}`,
-      {
-        headers: {
-          Authorization: BLOXLINK_API_KEY,
-        },
-      }
+      { headers: { Authorization: BLOXLINK_API_KEY } }
     );
 
     const contentType = res.headers.get("content-type");
@@ -59,16 +194,16 @@ async function getDiscordIdsFromRoblox(robloxUserId) {
     }
 
     const data = await res.json();
+    const ids =
+      data.discordIDs && Array.isArray(data.discordIDs) ? data.discordIDs : [];
 
-    if (data.discordIDs && Array.isArray(data.discordIDs)) {
-      // Cache the result
-      robloxToDiscordCache.set(String(robloxUserId), data.discordIDs);
-      return data.discordIDs;
+    // Cache both directions
+    robloxToDiscordCache.set(String(robloxUserId), ids);
+    for (const discordId of ids) {
+      discordToRobloxCache.set(discordId, robloxUserId);
     }
 
-    // Cache empty result too so we don't keep asking
-    robloxToDiscordCache.set(String(robloxUserId), []);
-    return [];
+    return ids;
   } catch (err) {
     console.error(
       `[Bloxlink] Failed to look up Roblox user ${robloxUserId}:`,
@@ -80,8 +215,6 @@ async function getDiscordIdsFromRoblox(robloxUserId) {
 
 // ── Role Logic ──
 
-// Given a rank, returns which roles they should have
-// Top 10 gets ALL three roles, Top 50 gets Top 50 + Top 100, Top 100 gets just Top 100
 function getRolesForRank(rank) {
   const roles = [];
   if (rank <= 10) roles.push(TOP10_ROLE_ID, TOP50_ROLE_ID, TOP100_ROLE_ID);
@@ -92,7 +225,6 @@ function getRolesForRank(rank) {
 
 const ALL_TIER_ROLES = () => [TOP10_ROLE_ID, TOP50_ROLE_ID, TOP100_ROLE_ID];
 
-// Get the best (lowest) rank for a Discord ID across all leaderboards
 function getBestRank(discordId) {
   let best = Infinity;
   for (const ranks of Object.values(leaderboardData)) {
@@ -103,8 +235,6 @@ function getBestRank(discordId) {
   return best === Infinity ? null : best;
 }
 
-// ── Role Management ──
-
 async function syncAllRoles() {
   const guild = client.guilds.cache.get(GUILD_ID);
   if (!guild) {
@@ -112,7 +242,6 @@ async function syncAllRoles() {
     return;
   }
 
-  // Collect every Discord ID we've ever tracked
   const allDiscordIds = new Set();
   for (const ranks of Object.values(leaderboardData)) {
     for (const discordId of Object.keys(ranks)) {
@@ -131,7 +260,6 @@ async function syncAllRoles() {
       const member = await guild.members.fetch(discordId).catch(() => null);
       if (!member) continue;
 
-      // Add roles they should have
       for (const roleId of shouldHave) {
         if (!member.roles.cache.has(roleId)) {
           await member.roles.add(roleId);
@@ -141,7 +269,6 @@ async function syncAllRoles() {
         }
       }
 
-      // Remove roles they shouldn't have
       for (const roleId of shouldNotHave) {
         if (member.roles.cache.has(roleId)) {
           await member.roles.remove(roleId);
@@ -170,11 +297,8 @@ function startServer() {
     res.json({ status: "ok", bot: client.user.tag });
   });
 
-  // Receives leaderboard data from your Roblox game
-  // Expected body: { leaderboard: "Currency", players: [{ userId: 123, rank: 1 }, ...] }
-  // Send up to 100 players per leaderboard
+  // Receives leaderboard data from Roblox
   app.post("/api/leaderboard", async (req, res) => {
-    // Auth check
     if (req.headers.authorization !== API_SECRET) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -189,8 +313,7 @@ function startServer() {
       `[API] Received ${players.length} players for leaderboard: ${leaderboard}`
     );
 
-    // Resolve Roblox user IDs → Discord user IDs via Bloxlink
-    const rankMap = {}; // { discordId: rank }
+    const rankMap = {};
     let apiCalls = 0;
 
     for (const player of players) {
@@ -200,19 +323,16 @@ function startServer() {
       if (!wasCached) apiCalls++;
 
       for (const id of discordIds) {
-        // Keep the best (lowest) rank if they appear multiple times
         if (rankMap[id] === undefined || player.rank < rankMap[id]) {
           rankMap[id] = player.rank;
         }
       }
 
-      // Small delay between non-cached API calls
       if (!wasCached) {
         await new Promise((r) => setTimeout(r, 200));
       }
     }
 
-    // Store this leaderboard's data
     leaderboardData[leaderboard] = rankMap;
 
     const resolvedCount = Object.keys(rankMap).length;
@@ -220,15 +340,36 @@ function startServer() {
       `[API] Resolved ${resolvedCount} Discord accounts (${apiCalls} API calls, ${players.length - apiCalls} cached)`
     );
 
-    // Sync all roles across all leaderboards
     await syncAllRoles();
 
-    res.json({
-      success: true,
-      leaderboard,
-      resolvedCount,
-      apiCalls,
-    });
+    res.json({ success: true, leaderboard, resolvedCount, apiCalls });
+  });
+
+  // Receives player stats from Roblox (call on join and on leave)
+  // Expected body: { userId: 123, username: "Player1", currency: 5000, rebirths: 3, crates: 10, playtime: 120 }
+  app.post("/api/stats", async (req, res) => {
+    if (req.headers.authorization !== API_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { userId, username, ...stats } = req.body;
+
+    if (!userId || !username) {
+      return res.status(400).json({ error: "Missing userId or username" });
+    }
+
+    // Store stats
+    playerStats.set(String(userId), { username, ...stats });
+
+    // Also resolve and cache their Discord ID
+    const wasCached = robloxToDiscordCache.has(String(userId));
+    if (!wasCached) {
+      await getDiscordIdsFromRoblox(userId);
+    }
+
+    console.log(`[Stats] Updated stats for ${username} (${userId})`);
+
+    res.json({ success: true });
   });
 
   app.listen(PORT, () => {
@@ -236,11 +377,12 @@ function startServer() {
   });
 }
 
-// ── Clear cache every 6 hours so changes get picked up ──
+// ── Clear cache every 6 hours ──
 
 setInterval(
   () => {
     robloxToDiscordCache.clear();
+    discordToRobloxCache.clear();
     console.log("[Cache] Cleared Bloxlink cache");
   },
   6 * 60 * 60 * 1000

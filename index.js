@@ -7,6 +7,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const TOP10_ROLE_ID = process.env.TOP10_ROLE_ID;
 const API_SECRET = process.env.API_SECRET;
+const BLOXLINK_API_KEY = process.env.BLOXLINK_API_KEY;
 const PORT = process.env.PORT || 3000;
 
 // ── Discord Client ──
@@ -35,25 +36,39 @@ client.once("ready", () => {
   startServer();
 });
 
-// ── RoVer API ──
-// Public endpoint: Roblox User ID → Discord User IDs
-// Rate limit: 60 requests per 60 seconds
+// ── Bloxlink API ──
+// Endpoint: Roblox User ID → Discord User IDs (server-specific)
+// Rate limit: 500 requests per day
 
 async function getDiscordIdsFromRoblox(robloxUserId) {
   try {
     const res = await fetch(
-      `https://verify.eryn.io/api/roblox/${robloxUserId}`
+      `https://api.blox.link/v4/public/guilds/${GUILD_ID}/roblox-to-discord/${robloxUserId}`,
+      {
+        headers: {
+          Authorization: BLOXLINK_API_KEY,
+        },
+      }
     );
+
+    const contentType = res.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      console.error(
+        `[Bloxlink] Non-JSON response for user ${robloxUserId} (status ${res.status})`
+      );
+      return [];
+    }
+
     const data = await res.json();
 
-    if (data.status === "ok" && Array.isArray(data.users)) {
-      return data.users; // Array of Discord ID strings
+    if (data.discordIDs && Array.isArray(data.discordIDs)) {
+      return data.discordIDs;
     }
 
     return [];
   } catch (err) {
     console.error(
-      `[RoVer] Failed to look up Roblox user ${robloxUserId}:`,
+      `[Bloxlink] Failed to look up Roblox user ${robloxUserId}:`,
       err.message
     );
     return [];
@@ -142,7 +157,7 @@ function startServer() {
       `[API] Received top ${players.length} for leaderboard: ${leaderboard}`
     );
 
-    // Resolve Roblox user IDs → Discord user IDs via RoVer
+    // Resolve Roblox user IDs → Discord user IDs via Bloxlink
     const allDiscordIds = [];
 
     for (const player of players) {
@@ -152,7 +167,7 @@ function startServer() {
         allDiscordIds.push(id);
       }
 
-      // Small delay to respect RoVer rate limit (60 req/min)
+      // Small delay to be respectful of rate limits
       await new Promise((r) => setTimeout(r, 200));
     }
 

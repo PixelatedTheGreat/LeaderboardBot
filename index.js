@@ -5,6 +5,7 @@ const {
   Routes,
   SlashCommandBuilder,
   EmbedBuilder,
+  ActivityType,
 } = require("discord.js");
 const express = require("express");
 
@@ -75,6 +76,24 @@ client.once("ready", async () => {
   startServer();
 });
 
+async function updateStatus() {
+  try {
+    const res = await fetch(
+      "https://games.roproxy.com/v1/games?universeIds=YOUR_UNIVERSE_ID"
+    );
+    const data = await res.json();
+    const playerCount = data.data?.[0]?.playing || 0;
+
+    client.user.setActivity(`${playerCount} players on YouTube Clicker`, {
+      type: ActivityType.Custom,
+    });
+  } catch (err) {
+    console.error("[Status] Failed to fetch player count:", err.message);
+  }
+}
+
+setInterval(updateStatus, 60_000);
+
 // ── Slash Command Handler ──
 
 client.on("interactionCreate", async (interaction) => {
@@ -138,7 +157,7 @@ client.on("interactionCreate", async (interaction) => {
     if (stats.playtime !== undefined)
       embed.addFields({
         name: "Playtime",
-        value: formatPlaytime(stats.playtime),
+        value: String(stats.playtime),
         inline: true,
       });
 
